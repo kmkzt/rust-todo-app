@@ -1,8 +1,9 @@
-use actix_web::{web, get, App, HttpResponse, HttpServer, ResponseError};
+use actix_web::{get, http::header, post, web, App, HttpResponse, HttpServer, ResponseError};
 use askama::Template;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
+use serde::Deserialize;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -18,6 +19,40 @@ enum MyError {
 }
 impl ResponseError for MyError {}
 
+#[derive(Deserialize)]
+struct AddParams {
+    text: String,
+}
+#[post("/add")]
+async fn add_todo(
+    params: web::Form<AddParams>,
+    db: web::Data<r2d2::Pool<SqliteConnectionManager>>,
+) -> Result<HttpResponse, MyError> {
+    let conn = db.get()?;
+    conn.execute("INSERT INTO todo (text) VALUES (?)", &[&params.text])?;
+
+    Ok(HttpResponse::SeeOther()
+        .header(header::LOCATION, "/")
+        .finish())
+}
+
+#[derive(Deserialize)]
+struct DeleteParams {
+    id: u32,
+}
+
+#[post("/delete")]
+async fn delete_todo(
+    params: web::Form<DeleteParams>,
+    db: web::Data<r2d2::Pool<SqliteConnectionManager>>,
+) -> Result<HttpResponse, MyError> {
+    let conn = db.get()?;
+    conn.execute("DELETE FROM todo WHERE id=?", &[params.id])?;
+    Ok(HttpResponse::SeeOther()
+        .header(header::LOCATION, "/")
+        .finish())
+}
+
 struct TodoEntry {
     id: u32,
     text: String,
@@ -30,7 +65,7 @@ struct IndexTemplate {
 }
 
 #[get("/")]
-async fn index(db: web::Data<Pool<SqliteConnectionManager>> ) -> Result<HttpResponse, MyError> {
+async fn index(db: web::Data<Pool<SqliteConnectionManager>>) -> Result<HttpResponse, MyError> {
     let conn = db.get()?;
     let mut statement = conn.prepare("SELECT id, text FROM todo")?;
     let rows = statement.query_map(params![], |row| {
@@ -55,17 +90,15 @@ async fn index(db: web::Data<Pool<SqliteConnectionManager>> ) -> Result<HttpResp
     let html = IndexTemplate { entries };
     let response_body = html.render()?;
 
-    Ok(
-        HttpResponse::Ok()
-            .content_type("text/html")
-            .body(response_body)
-    )
+    Ok(HttpResponse::Ok()
+        .content_type("text/html")
+        .body(response_body))
 }
 
 #[actix_rt::main]
 async fn main() -> Result<(), actix_web::Error> {
-    let manager =SqliteConnectionManager::file("todo.db");
-    let pool = Pool::new(manager).expect("Fialed to initialaize the connection pool!");
+    let manager = SqliteConnectionManager::file("todo.db");
+    let pool = Pool::new(manager).expect("Failed to initialaize the connection pool!");
     let conn = pool
         .get()
         .expect("Failed to get the connection from the pool.");
@@ -74,19 +107,21 @@ async fn main() -> Result<(), actix_web::Error> {
         "CREATE TABLE IF NOT EXISTS todo (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             text TEXT NOT NULL
-        )", 
-        params![]
+        )",
+        params![],
     )
-        .expect("Failed to crate a table `todo`.");
+    .expect("Failed to crate a table `todo`.");
 
-    HttpServer::new(
-        move || App::new()
+    HttpServer::new(move || {
+        App::new()
             .service(index)
+            .service(add_todo)
+            .service(delete_todo)
             .data(pool.clone())
-    )
-        .bind("0.0.0.0:8080")?
-        .run()
-        .await?;
+    })
+    .bind("0.0.0.0:8080")?
+    .run()
+    .await?;
 
     Ok(())
 }
